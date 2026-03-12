@@ -1,3 +1,15 @@
+
+usr.md
+plan.md
+.python-version
+
+# Model artifacts
+*.tar
+*.tar.gz
+*.safetensors
+model_staging/
+notebook_poc/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
