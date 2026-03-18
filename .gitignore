@@ -2,6 +2,7 @@
 usr.md
 plan.md
 .python-version
+.fastembed_cache/
 
 # Model artifacts
 *.tar
