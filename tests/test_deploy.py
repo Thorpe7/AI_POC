@@ -26,13 +26,20 @@ class TestParseArgs:
         with pytest.raises(SystemExit):
             parse_args([])
 
+    def test_required_endpoint_name(self) -> None:
+        with pytest.raises(SystemExit):
+            parse_args(["--model-data", "s3://bucket/model.tar.gz"])
+
     def test_defaults(self) -> None:
-        args = parse_args(["--model-data", "s3://bucket/model.tar.gz"])
+        args = parse_args([
+            "--model-data", "s3://bucket/model.tar.gz",
+            "--endpoint-name", "my-endpoint",
+        ])
         assert args.model_data == "s3://bucket/model.tar.gz"
         assert args.role_arn is None
         assert args.region is None
         assert args.instance_type == "ml.g5.xlarge"
-        assert args.endpoint_name == "medgemma-endpoint"
+        assert args.endpoint_name == "my-endpoint"
         assert args.hf_token is None
         assert args.image_uri is None
         assert args.dry_run is False
@@ -310,6 +317,7 @@ class TestMain:
         main([
             "--model-data", "s3://bucket/model.tar.gz",
             "--role-arn", "arn:aws:iam::123:role/SageMaker",
+            "--endpoint-name", "my-endpoint",
             "--dry-run",
         ])
 
@@ -319,7 +327,7 @@ class TestMain:
         assert "arn:aws:iam::123:role/SageMaker" in out
         assert "us-east-1" in out
         assert "ml.g5.xlarge" in out
-        assert "medgemma-endpoint" in out
+        assert "my-endpoint" in out
 
     @patch("deploy.boto3.Session")
     def test_delete_flow(
@@ -352,7 +360,10 @@ class TestMain:
         mock_session.region_name = None
 
         with pytest.raises(SystemExit):
-            main(["--model-data", "s3://bucket/model.tar.gz"])
+            main([
+                "--model-data", "s3://bucket/model.tar.gz",
+                "--endpoint-name", "test-ep",
+            ])
 
     @patch("deploy.boto3.Session")
     def test_no_credentials_exits(self, mock_session_cls: MagicMock) -> None:
@@ -364,7 +375,10 @@ class TestMain:
         mock_sts.get_caller_identity.side_effect = NoCredentialsError()
 
         with pytest.raises(SystemExit):
-            main(["--model-data", "s3://bucket/model.tar.gz"])
+            main([
+                "--model-data", "s3://bucket/model.tar.gz",
+                "--endpoint-name", "test-ep",
+            ])
 
     @patch("deploy.boto3.Session")
     def test_endpoint_already_exists_exits(
@@ -388,4 +402,7 @@ class TestMain:
         mock_session.client.side_effect = client_factory
 
         with pytest.raises(SystemExit):
-            main(["--model-data", "s3://bucket/model.tar.gz"])
+            main([
+                "--model-data", "s3://bucket/model.tar.gz",
+                "--endpoint-name", "test-ep",
+            ])

@@ -1,17 +1,30 @@
-"""Package MedGemma model weights and inference code into a model.tar.gz for SageMaker."""
+"""Package inference code and configs into a lightweight model.tar.gz for SageMaker.
+
+No model weights are included — weights are stored separately in S3 and downloaded
+at inference time by the ModelRegistry. This keeps the tarball small (KB, not GB).
+
+Tarball structure:
+    configs/
+        medgemma.json
+        (future models...)
+    code/
+        inference.py          <- shim (from src/shims/hf_inference.py)
+        requirements.txt
+        handlers/
+            __init__.py
+            base.py
+            hf_handler.py
+            registry.py
+            utils.py
+"""
 
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
-import sys
 import tarfile
 from pathlib import Path
 
-REQUIRED_DISK_GB = 18
-MODEL_PAGE_URL = "https://huggingface.co/google/medgemma-4b"
-IGNORE_PATTERNS = ["*.gguf", "*.md", ".gitattributes"]
 CODE_REQUIREMENTS = """\
 # HF DLC includes torch, transformers, accelerate, Pillow.
 # Only add deps missing from the container image.
@@ -21,12 +34,7 @@ CODE_REQUIREMENTS = """\
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Package MedGemma model artifacts into a SageMaker-compatible tar archive."
-    )
-    parser.add_argument(
-        "--model-id",
-        default="google/medgemma-1.5-4b-it",
-        help="HuggingFace model ID (default: google/medgemma-1.5-4b-it)",
+        description="Package multi-model inference code and configs into a SageMaker tarball."
     )
     parser.add_argument(
         "--output",
@@ -34,14 +42,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Output archive path (default: ./model.tar.gz)",
     )
     parser.add_argument(
+        "--configs-dir",
+        default=None,
+        help="Path to configs directory (default: src/configs/ relative to this script)",
+    )
+    parser.add_argument(
         "--work-dir",
         default="./model_staging",
         help="Temporary staging directory (default: ./model_staging)",
-    )
-    parser.add_argument(
-        "--hf-token",
-        default=None,
-        help="HuggingFace auth token (default: $MED_GEM_TOKEN env var)",
     )
     parser.add_argument(
         "--no-compress",
@@ -56,93 +64,68 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def get_hf_token(cli_token: str | None) -> str:
-    """Resolve the HuggingFace token from CLI arg or environment variable."""
-    token = cli_token or os.environ.get("MED_GEM_TOKEN")
-    if not token:
-        print(
-            "Error: No HuggingFace token provided.\n"
-            "Set MED_GEM_TOKEN environment variable or pass --hf-token.\n"
-            f"You must also accept the model license at {MODEL_PAGE_URL}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return token
+def stage_code(staging_dir: Path, configs_dir: Path) -> None:
+    """Assemble the tarball directory structure under staging_dir.
 
+    Creates:
+        staging_dir/configs/*.json       (at tarball root)
+        staging_dir/code/inference.py    (shim)
+        staging_dir/code/requirements.txt
+        staging_dir/code/handlers/       (handler package)
+    """
+    src_root = Path(__file__).resolve().parent
 
-def check_disk_space(path: Path, required_gb: float) -> None:
-    """Verify sufficient disk space is available."""
-    stat = shutil.disk_usage(path.parent if path.parent.exists() else Path.cwd())
-    free_gb = stat.free / (1024**3)
-    if free_gb < required_gb:
-        print(
-            f"Error: Insufficient disk space. Need ~{required_gb:.0f} GB, "
-            f"have {free_gb:.1f} GB free.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    # --- configs/ at tarball root ---
+    dest_configs = staging_dir / "configs"
+    if dest_configs.exists():
+        shutil.rmtree(dest_configs)
+    shutil.copytree(
+        configs_dir,
+        dest_configs,
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
 
+    # --- code/ directory ---
+    code_dir = staging_dir / "code"
+    code_dir.mkdir(parents=True, exist_ok=True)
 
-def download_model(model_id: str, staging_dir: Path, token: str) -> Path:
-    """Download model snapshot from HuggingFace Hub."""
-    from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
-    from huggingface_hub.errors import GatedRepoError  # type: ignore[import-not-found]
+    # Copy shim as inference.py (SageMaker entry point)
+    shim_src = src_root / "shims" / "hf_inference.py"
+    if not shim_src.exists():
+        raise FileNotFoundError(f"Shim not found: {shim_src}")
+    shutil.copy2(shim_src, code_dir / "inference.py")
 
-    model_dir = staging_dir / "model"
-    print(f"Downloading {model_id} to {model_dir} ...")
-    try:
-        snapshot_download(
-            repo_id=model_id,
-            local_dir=str(model_dir),
-            token=token,
-            ignore_patterns=IGNORE_PATTERNS,
-        )
-    except GatedRepoError:
-        print(
-            f"Error: Access denied — {model_id} is a gated model.\n"
-            f"Accept the license at {MODEL_PAGE_URL} then retry.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    print(f"Download complete: {model_dir}")
-    return model_dir
+    # Copy handlers package
+    handlers_src = src_root / "handlers"
+    if not handlers_src.exists():
+        raise FileNotFoundError(f"Handlers package not found: {handlers_src}")
+    dest_handlers = code_dir / "handlers"
+    if dest_handlers.exists():
+        shutil.rmtree(dest_handlers)
+    shutil.copytree(
+        handlers_src,
+        dest_handlers,
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
 
-
-def stage_code(model_dir: Path) -> None:
-    """Copy inference code and write requirements into the code/ subdirectory."""
-    code_dir = model_dir / "code"
-    code_dir.mkdir(exist_ok=True)
-
-    inference_src = Path(__file__).resolve().parent / "inference.py"
-    if not inference_src.exists():
-        print(f"Error: {inference_src} not found.", file=sys.stderr)
-        sys.exit(1)
-
-    shutil.copy2(inference_src, code_dir / "inference.py")
+    # Write requirements.txt
     (code_dir / "requirements.txt").write_text(CODE_REQUIREMENTS)
-    print(f"Staged code/ directory: {code_dir}")
+
+    print(f"Staged tarball structure under {staging_dir}")
 
 
-def clean_staging(model_dir: Path) -> None:
-    """Remove HuggingFace cache metadata from staging directory."""
-    hf_cache = model_dir / ".cache"
-    if hf_cache.exists():
-        shutil.rmtree(hf_cache)
-        print("Cleaned .cache/ from staging directory")
-
-
-def create_archive(model_dir: Path, output_path: Path, *, compress: bool) -> None:
-    """Create tar archive with model artifacts at the root level."""
+def create_archive(staging_dir: Path, output_path: Path, *, compress: bool) -> None:
+    """Create tar archive with all staged content at the root level."""
     mode = "w:gz" if compress else "w"
     suffix = "tar.gz" if compress else "tar"
     print(f"Creating {suffix} archive at {output_path} ...")
 
     with tarfile.open(str(output_path), mode) as tar:  # type: ignore[call-overload]
-        for item in sorted(model_dir.iterdir()):
+        for item in sorted(staging_dir.iterdir()):
             tar.add(str(item), arcname=item.name)
 
-    size_gb = output_path.stat().st_size / (1024**3)
-    print(f"Archive created: {output_path} ({size_gb:.2f} GB)")
+    size_kb = output_path.stat().st_size / 1024
+    print(f"Archive created: {output_path} ({size_kb:.1f} KB)")
 
 
 def count_archive_files(output_path: Path) -> int:
@@ -152,21 +135,28 @@ def count_archive_files(output_path: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Package MedGemma model for SageMaker deployment."""
+    """Package multi-model inference code for SageMaker deployment."""
     args = parse_args(argv)
 
-    token = get_hf_token(args.hf_token)
     output_path = Path(args.output).resolve()
     staging_dir = Path(args.work_dir).resolve()
 
-    check_disk_space(staging_dir, REQUIRED_DISK_GB)
+    # Resolve configs directory
+    if args.configs_dir:
+        configs_dir = Path(args.configs_dir).resolve()
+    else:
+        configs_dir = Path(__file__).resolve().parent / "configs"
 
-    staging_dir.mkdir(parents=True, exist_ok=True)
+    if not configs_dir.is_dir():
+        raise FileNotFoundError(f"Configs directory not found: {configs_dir}")
 
-    model_dir = download_model(args.model_id, staging_dir, token)
-    stage_code(model_dir)
-    clean_staging(model_dir)
-    create_archive(model_dir, output_path, compress=not args.no_compress)
+    # Clean and create staging dir
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+
+    stage_code(staging_dir, configs_dir)
+    create_archive(staging_dir, output_path, compress=not args.no_compress)
 
     file_count = count_archive_files(output_path)
     print(f"\nDone! {file_count} files archived.")

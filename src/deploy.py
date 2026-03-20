@@ -1,4 +1,4 @@
-"""Deploy (or tear down) a SageMaker real-time endpoint for MedGemma."""
+"""Deploy (or tear down) a SageMaker real-time endpoint for multi-model inference."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError, NoCredentialsError  # type: ignore[
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Deploy or tear down a SageMaker real-time endpoint for MedGemma."
+        description="Deploy or tear down a SageMaker real-time endpoint for multi-model inference."
     )
     parser.add_argument(
         "--model-data",
@@ -39,8 +39,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--endpoint-name",
-        default="medgemma-endpoint",
-        help="Endpoint name (default: medgemma-endpoint)",
+        required=True,
+        help="Endpoint name (required)",
     )
     parser.add_argument(
         "--hf-token",
@@ -247,7 +247,7 @@ def deploy_model(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Deploy or tear down a SageMaker endpoint for MedGemma."""
+    """Deploy or tear down a SageMaker endpoint for multi-model inference."""
     args = parse_args(argv)
 
     # Resolve region and create session
