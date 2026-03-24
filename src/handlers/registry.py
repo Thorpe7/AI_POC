@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import importlib
 import json
 import logging
 import os
@@ -14,21 +15,22 @@ from typing import Any
 import boto3  # type: ignore[import-untyped]
 import torch
 
-from handlers.hf_handler import HFHandler
+from handlers.base import BaseHandler
 from handlers.utils import parse_s3_uri
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_CONFIG_FIELDS = {
-    "auto_class",
-    "processor_class",
-    "dtype",
-    "device_map",
-    "input_modality",
-    "generation_params",
-    "output_key",
+# Fields validated by the registry itself; handler-specific fields are
+# validated by each handler's __init__.
+REGISTRY_REQUIRED_FIELDS = {
     "estimated_gpu_memory_gb",
     "weights_s3_uri",
+}
+
+# Maps handler_class config values to (module_path, class_name).
+_HANDLER_REGISTRY: dict[str, tuple[str, str]] = {
+    "HFHandler": ("handlers.hf_handler", "HFHandler"),
+    "MerlinHandler": ("handlers.merlin_handler", "MerlinHandler"),
 }
 
 GPU_USABLE_FRACTION = 0.85
@@ -55,13 +57,13 @@ class ModelRegistry:
 
         # LRU cache: oldest items first, newest (most recently used) at the end
         self.cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        self.handlers: dict[str, HFHandler] = {}
+        self.handlers: dict[str, BaseHandler] = {}
         self.weights_cache_dir = Path(os.environ.get("WEIGHTS_CACHE_DIR", "/tmp/model_weights"))
         self.weights_cache_dir.mkdir(parents=True, exist_ok=True)
 
         # GPU memory tracking
         if torch.cuda.is_available():
-            total = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+            total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             self.total_gpu_memory_gb = total * GPU_USABLE_FRACTION
         else:
             self.total_gpu_memory_gb = 0.0
@@ -82,7 +84,7 @@ class ModelRegistry:
             try:
                 with open(path) as f:
                     config = json.load(f)
-                missing = REQUIRED_CONFIG_FIELDS - set(config.keys())
+                missing = REGISTRY_REQUIRED_FIELDS - set(config.keys())
                 if missing:
                     logger.warning("Skipping %s: missing fields %s", model_id, missing)
                     continue
@@ -91,7 +93,7 @@ class ModelRegistry:
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning("Skipping %s: %s", path.name, exc)
 
-    def get_or_load(self, model_id: str) -> tuple[HFHandler, dict[str, Any]]:
+    def get_or_load(self, model_id: str) -> tuple[BaseHandler, dict[str, Any]]:
         """Return the handler and loaded model dict for the given model ID.
 
         On cache miss: ensures GPU memory, downloads weights from S3 if needed,
@@ -129,7 +131,7 @@ class ModelRegistry:
 
             local_dir = self._download_weights(model_id, config)
 
-            handler = HFHandler(config)
+            handler = self._resolve_handler(config)
             try:
                 model_dict = handler.model_fn(str(local_dir))
             except torch.cuda.OutOfMemoryError:
@@ -184,19 +186,34 @@ class ModelRegistry:
         logger.info("Evicted %s (freed %.1f GB)", evicted_id, evicted_gb)
 
     @staticmethod
-    def _unload_model(model_dict: dict[str, Any]) -> None:
-        """Move model to CPU and free GPU memory."""
-        model = model_dict.get("model")
-        if model is not None:
-            try:
-                model.cpu()
-            except Exception:
-                pass
-            del model_dict["model"]
+    def _resolve_handler(config: dict[str, Any]) -> BaseHandler:
+        """Instantiate the handler class specified in config.
 
-        processor = model_dict.get("processor")
-        if processor is not None:
-            del model_dict["processor"]
+        Falls back to HFHandler when ``handler_class`` is absent (backward compat).
+        """
+        handler_name = config.get("handler_class", "HFHandler")
+        entry = _HANDLER_REGISTRY.get(handler_name)
+        if entry is None:
+            raise ValueError(
+                f"Unknown handler_class '{handler_name}'. "
+                f"Available: {list(_HANDLER_REGISTRY.keys())}"
+            )
+        module_path, class_name = entry
+        module = importlib.import_module(module_path)
+        handler_cls = getattr(module, class_name)
+        return handler_cls(config)
+
+    @staticmethod
+    def _unload_model(model_dict: dict[str, Any]) -> None:
+        """Move all torch modules to CPU and free GPU memory."""
+        for key in list(model_dict.keys()):
+            value = model_dict[key]
+            if isinstance(value, torch.nn.Module):
+                try:
+                    value.cpu()
+                except Exception:
+                    pass
+            del model_dict[key]
 
         gc.collect()
         if torch.cuda.is_available():

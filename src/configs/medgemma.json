@@ -14,5 +14,7 @@
   },
   "output_key": "generated_text",
   "estimated_gpu_memory_gb": 9.0,
-  "requires_hf_token": true
+  "requires_hf_token": true,
+  "supports_chat": true,
+  "max_chat_turns": 20
 }

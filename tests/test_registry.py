@@ -1,4 +1,4 @@
-"""Tests for the ModelRegistry: init, get_or_load, eviction, and weight download."""
+"""Tests for the ModelRegistry: init, get_or_load, eviction, handler dispatch, and weight download."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from handlers.base import BaseHandler
 
 # ── TestRegistryInit ──
 
@@ -108,7 +110,7 @@ class TestRegistryGetOrLoad:
             patch.object(
                 mock_registry, "_download_weights", return_value=Path("/tmp/w")
             ) as mock_dl,
-            patch("handlers.registry.HFHandler", return_value=mock_handler),
+            patch.object(mock_registry, "_resolve_handler", return_value=mock_handler),
         ):
             handler, model_dict = mock_registry.get_or_load("medgemma")
 
@@ -167,7 +169,7 @@ class TestRegistryGetOrLoad:
 
         with (
             patch.object(mock_registry, "_download_weights", return_value=Path("/tmp/w")),
-            patch("handlers.registry.HFHandler", return_value=mock_handler),
+            patch.object(mock_registry, "_resolve_handler", return_value=mock_handler),
             patch.object(mock_registry, "_unload_model") as mock_unload,
         ):
             mock_registry.get_or_load("medgemma")
@@ -292,3 +294,116 @@ class TestRegistryWeightDownload:
 
         mock_boto3.client.assert_not_called()
         assert result == local_dir
+
+
+# ── TestRegistryHandlerDispatch ──
+
+
+class TestRegistryHandlerDispatch:
+    """Tests for handler_class dispatch via _resolve_handler."""
+
+    def test_default_is_hf_handler(self, sample_medgemma_config: dict[str, Any]) -> None:
+        """Config without handler_class defaults to HFHandler."""
+        from handlers.hf_handler import HFHandler
+        from handlers.registry import ModelRegistry
+
+        handler = ModelRegistry._resolve_handler(sample_medgemma_config)
+        assert isinstance(handler, HFHandler)
+
+    def test_explicit_hf_handler(self, sample_medgemma_config: dict[str, Any]) -> None:
+        """Config with handler_class: HFHandler resolves correctly."""
+        from handlers.hf_handler import HFHandler
+        from handlers.registry import ModelRegistry
+
+        config = {**sample_medgemma_config, "handler_class": "HFHandler"}
+        handler = ModelRegistry._resolve_handler(config)
+        assert isinstance(handler, HFHandler)
+
+    def test_merlin_handler(self, sample_merlin_config: dict[str, Any]) -> None:
+        """Config with handler_class: MerlinHandler resolves correctly."""
+        from handlers.merlin_handler import MerlinHandler
+        from handlers.registry import ModelRegistry
+
+        handler = ModelRegistry._resolve_handler(sample_merlin_config)
+        assert isinstance(handler, MerlinHandler)
+
+    def test_unknown_handler_raises(self, sample_medgemma_config: dict[str, Any]) -> None:
+        """Unknown handler_class raises ValueError."""
+        from handlers.registry import ModelRegistry
+
+        config = {**sample_medgemma_config, "handler_class": "FooHandler"}
+        with pytest.raises(ValueError, match="Unknown handler_class"):
+            ModelRegistry._resolve_handler(config)
+
+
+# ── TestRegistryMultiModel ──
+
+
+class TestRegistryMultiModel:
+    """Tests for registry with both MedGemma and Merlin configs."""
+
+    def test_loads_both_configs(self, multi_model_configs_dir: Path) -> None:
+        """Registry loads both medgemma and merlin configs."""
+        with (
+            patch("handlers.registry.torch") as mock_torch,
+            patch("handlers.registry.boto3"),
+            patch.dict(os.environ, {"WEIGHTS_CACHE_DIR": str(multi_model_configs_dir.parent / "w")}),
+        ):
+            mock_torch.cuda.is_available.return_value = False
+            (multi_model_configs_dir.parent / "w").mkdir(exist_ok=True)
+
+            from handlers.registry import ModelRegistry
+
+            registry = ModelRegistry(multi_model_configs_dir)
+
+        assert registry.is_known_model("medgemma")
+        assert registry.is_known_model("merlin")
+        models = registry.get_available_models()
+        assert len(models) == 2
+        model_ids = {m["model_id"] for m in models}
+        assert model_ids == {"medgemma", "merlin"}
+
+    def test_lru_eviction_across_handler_types(
+        self,
+        multi_model_configs_dir: Path,
+        sample_medgemma_config: dict[str, Any],
+    ) -> None:
+        """LRU eviction works when models use different handler types."""
+        with (
+            patch("handlers.registry.torch") as mock_torch,
+            patch("handlers.registry.boto3"),
+            patch.dict(os.environ, {"WEIGHTS_CACHE_DIR": str(multi_model_configs_dir.parent / "w")}),
+        ):
+            mock_torch.cuda.is_available.return_value = True
+            mock_torch.cuda.get_device_properties.return_value = MagicMock(
+                total_memory=24 * (1024**3)
+            )
+            mock_torch.cuda.OutOfMemoryError = RuntimeError
+            mock_torch.cuda.empty_cache = MagicMock()
+            mock_torch.nn.Module = type("FakeModule", (), {})
+            (multi_model_configs_dir.parent / "w").mkdir(exist_ok=True)
+
+            from handlers.registry import ModelRegistry
+
+            registry = ModelRegistry(multi_model_configs_dir)
+
+        # Manually populate cache: medgemma using 9 GB
+        import torch
+
+        mock_model = MagicMock(spec=torch.nn.Module)
+        registry.cache["medgemma"] = {"model": mock_model, "processor": MagicMock()}
+        registry.handlers["medgemma"] = MagicMock()
+        registry.used_gpu_memory_gb = 9.0
+
+        # Loading merlin (12 GB) should evict medgemma (9+12 > 20.4 usable)
+        mock_merlin_handler = MagicMock()
+        mock_merlin_handler.model_fn.return_value = {"model_dir": "/tmp", "loaded_modes": {}}
+
+        with (
+            patch.object(registry, "_download_weights", return_value=Path("/tmp/w")),
+            patch.object(registry, "_resolve_handler", return_value=mock_merlin_handler),
+        ):
+            registry.get_or_load("merlin")
+
+        assert "medgemma" not in registry.cache
+        assert "merlin" in registry.cache

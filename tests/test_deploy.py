@@ -44,6 +44,8 @@ class TestParseArgs:
         assert args.image_uri is None
         assert args.dry_run is False
         assert args.delete is False
+        assert args.async_inference is False
+        assert args.async_s3_output is None
 
     def test_all_flags(self) -> None:
         args = parse_args([
@@ -406,3 +408,109 @@ class TestMain:
                 "--model-data", "s3://bucket/model.tar.gz",
                 "--endpoint-name", "test-ep",
             ])
+
+
+# --- async inference ---
+
+
+class TestAsyncDeploy:
+    def test_async_flag_parsed(self) -> None:
+        args = parse_args([
+            "--model-data", "s3://b/m.tar.gz",
+            "--endpoint-name", "my-ep",
+            "--async-inference",
+            "--async-s3-output", "s3://bucket/async",
+        ])
+        assert args.async_inference is True
+        assert args.async_s3_output == "s3://bucket/async"
+
+    @patch("deploy.resolve_image_uri", return_value="img:tag")
+    def test_async_produces_async_inference_config(self, _mock: MagicMock) -> None:
+        sm = MagicMock()
+        waiter = MagicMock()
+        sm.get_waiter.return_value = waiter
+
+        deploy_model(
+            model_data="s3://b/m.tar.gz",
+            role_arn="arn:role",
+            instance_type="ml.g5.xlarge",
+            endpoint_name="test-ep",
+            region="us-east-1",
+            hf_token=None,
+            image_uri=None,
+            sm_client=sm,
+            async_inference=True,
+            async_s3_output="s3://bucket/async",
+        )
+
+        config_kwargs = sm.create_endpoint_config.call_args[1]
+        assert "AsyncInferenceConfig" in config_kwargs
+        async_cfg = config_kwargs["AsyncInferenceConfig"]
+        assert async_cfg["OutputConfig"]["S3OutputPath"] == "s3://bucket/async/output/"
+        assert async_cfg["OutputConfig"]["S3FailurePath"] == "s3://bucket/async/failure/"
+        assert async_cfg["ClientConfig"]["MaxConcurrentInvocationsPerInstance"] == 1
+
+    @patch("deploy.resolve_image_uri", return_value="img:tag")
+    def test_async_without_s3_output_raises(self, _mock: MagicMock) -> None:
+        sm = MagicMock()
+        waiter = MagicMock()
+        sm.get_waiter.return_value = waiter
+
+        with pytest.raises(ValueError, match="async-s3-output"):
+            deploy_model(
+                model_data="s3://b/m.tar.gz",
+                role_arn="arn:role",
+                instance_type="ml.g5.xlarge",
+                endpoint_name="test-ep",
+                region="us-east-1",
+                hf_token=None,
+                image_uri=None,
+                sm_client=sm,
+                async_inference=True,
+                async_s3_output=None,
+            )
+
+    @patch("deploy.resolve_image_uri", return_value="img:tag")
+    def test_sync_deploy_has_no_async_config(self, _mock: MagicMock) -> None:
+        sm = MagicMock()
+        waiter = MagicMock()
+        sm.get_waiter.return_value = waiter
+
+        deploy_model(
+            model_data="s3://b/m.tar.gz",
+            role_arn="arn:role",
+            instance_type="ml.g5.xlarge",
+            endpoint_name="test-ep",
+            region="us-east-1",
+            hf_token=None,
+            image_uri=None,
+            sm_client=sm,
+            async_inference=False,
+        )
+
+        config_kwargs = sm.create_endpoint_config.call_args[1]
+        assert "AsyncInferenceConfig" not in config_kwargs
+
+    @patch("deploy.boto3.Session")
+    def test_async_dry_run(
+        self, mock_session_cls: MagicMock, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
+        mock_session.region_name = "us-east-1"
+        mock_sts = MagicMock()
+        mock_session.client.return_value = mock_sts
+        mock_sts.get_caller_identity.return_value = {"Account": "123456789"}
+
+        main([
+            "--model-data", "s3://bucket/model.tar.gz",
+            "--role-arn", "arn:aws:iam::123:role/SageMaker",
+            "--endpoint-name", "my-endpoint",
+            "--async-inference",
+            "--async-s3-output", "s3://bucket/async",
+            "--dry-run",
+        ])
+
+        out = capsys.readouterr().out
+        assert "async" in out.lower()
+        assert "s3://bucket/async" in out

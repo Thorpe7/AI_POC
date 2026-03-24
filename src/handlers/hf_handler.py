@@ -108,11 +108,14 @@ class HFHandler(BaseHandler):
         processor = model_dict["processor"]
 
         if self._config.get("use_chat_template", False):
-            content: list[dict[str, Any]] = []
-            if "image" in input_data:
-                content.append({"type": "image", "image": input_data["image"]})
-            content.append({"type": "text", "text": input_data["text"]})
-            messages = [{"role": "user", "content": content}]
+            if "messages" in input_data:
+                messages = input_data["messages"]
+            else:
+                content: list[dict[str, Any]] = []
+                if "image" in input_data:
+                    content.append({"type": "image", "image": input_data["image"]})
+                content.append({"type": "text", "text": input_data["text"]})
+                messages = [{"role": "user", "content": content}]
 
             inputs = processor.apply_chat_template(
                 messages,

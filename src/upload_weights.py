@@ -67,16 +67,34 @@ def download_from_hf(model_id: str, local_dir: Path, token: str | None) -> Path:
         Path to the download directory.
     """
     from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
+    from huggingface_hub.errors import GatedRepoError  # type: ignore[import-not-found]
 
     ignore_patterns = ["*.gguf", "*.md", ".gitattributes"]
     print(f"Downloading {model_id} to {local_dir} ...")
 
-    snapshot_download(
-        repo_id=model_id,
-        local_dir=str(local_dir),
-        token=token,
-        ignore_patterns=ignore_patterns,
-    )
+    if not token:
+        print(
+            "Warning: No HuggingFace token provided. Gated models will fail.\n"
+            "Set HF_TOKEN or MED_GEM_TOKEN, or pass --hf-token.",
+            file=sys.stderr,
+        )
+
+    try:
+        snapshot_download(
+            repo_id=model_id,
+            local_dir=str(local_dir),
+            token=token,
+            ignore_patterns=ignore_patterns,
+        )
+    except GatedRepoError:
+        print(
+            f"Error: Access denied — {model_id} is a gated model.\n"
+            f"1. Accept the license at https://huggingface.co/{model_id}\n"
+            f"2. Provide a token via --hf-token or HF_TOKEN env var.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print(f"Download complete: {local_dir}")
     return local_dir
 

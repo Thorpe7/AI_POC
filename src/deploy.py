@@ -1,4 +1,4 @@
-"""Deploy (or tear down) a SageMaker real-time endpoint for multi-model inference."""
+"""Deploy (or tear down) a SageMaker async/real-time endpoint for multi-model inference."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import os
 import re
 import sys
+from typing import Any
 
 import boto3  # type: ignore[import-untyped]
 from botocore.client import BaseClient  # type: ignore[import-untyped]
@@ -51,6 +52,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--image-uri",
         default=None,
         help="Override DLC image URI (bypasses SDK version resolution)",
+    )
+    parser.add_argument(
+        "--async-inference",
+        action="store_true",
+        help="Deploy as an async inference endpoint (supports large payloads, no 60s timeout)",
+    )
+    parser.add_argument(
+        "--async-s3-output",
+        default=None,
+        help="S3 URI prefix for async inference output (required with --async-inference)",
     )
     parser.add_argument(
         "--dry-run",
@@ -177,6 +188,8 @@ def deploy_model(
     hf_token: str | None,
     image_uri: str | None,
     sm_client: BaseClient | None = None,
+    async_inference: bool = False,
+    async_s3_output: str | None = None,
 ) -> str:
     """Create a SageMaker model, endpoint config, and endpoint using the boto3 API."""
     if sm_client is None:
@@ -186,7 +199,11 @@ def deploy_model(
         image_uri = resolve_image_uri(region, instance_type)
         print(f"Resolved DLC image: {image_uri}")
 
-    env: dict[str, str] = {}
+    env: dict[str, str] = {
+        # Prevent transformers from using meta-tensor init — merlin-vlm's
+        # load_state_dict() doesn't pass assign=True, so weights stay empty.
+        "TRANSFORMERS_NO_META_INIT": "1",
+    }
     if hf_token:
         env["HUGGING_FACE_HUB_TOKEN"] = hf_token
 
@@ -196,7 +213,8 @@ def deploy_model(
         "Environment": env,
     }
 
-    print(f"Deploying to endpoint '{endpoint_name}' on {instance_type} ...")
+    mode_label = "async" if async_inference else "real-time"
+    print(f"Deploying {mode_label} endpoint '{endpoint_name}' on {instance_type} ...")
     print("This typically takes 5-15 minutes.")
 
     # Create model
@@ -208,9 +226,9 @@ def deploy_model(
     print(f"Created model: {endpoint_name}")
 
     # Create endpoint config
-    sm_client.create_endpoint_config(
-        EndpointConfigName=endpoint_name,
-        ProductionVariants=[
+    endpoint_config_kwargs: dict[str, Any] = {
+        "EndpointConfigName": endpoint_name,
+        "ProductionVariants": [
             {
                 "VariantName": "AllTraffic",
                 "ModelName": endpoint_name,
@@ -218,7 +236,23 @@ def deploy_model(
                 "InitialInstanceCount": 1,
             }
         ],
-    )
+    }
+
+    if async_inference:
+        if not async_s3_output:
+            raise ValueError("--async-s3-output is required when using --async-inference")
+        s3_output = async_s3_output.rstrip("/")
+        endpoint_config_kwargs["AsyncInferenceConfig"] = {
+            "OutputConfig": {
+                "S3OutputPath": f"{s3_output}/output/",
+                "S3FailurePath": f"{s3_output}/failure/",
+            },
+            "ClientConfig": {
+                "MaxConcurrentInvocationsPerInstance": 1,
+            },
+        }
+
+    sm_client.create_endpoint_config(**endpoint_config_kwargs)
     print(f"Created endpoint config: {endpoint_name}")
 
     # Create endpoint and wait for it to be in service
@@ -305,6 +339,7 @@ def main(argv: list[str] | None = None) -> None:
     # Handle --dry-run
     if args.dry_run:
         hf_token = get_hf_token(args.hf_token)
+        mode_label = "async" if args.async_inference else "real-time"
         print("\n--- Dry-run config ---")
         print(f"  Model data:     {args.model_data}")
         print(f"  Role ARN:       {role_arn}")
@@ -313,6 +348,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  Endpoint name:  {args.endpoint_name}")
         print(f"  Image URI:      {args.image_uri or '(SDK-resolved DLC)'}")
         print(f"  HF token:       {'***' if hf_token else '(not set)'}")
+        print(f"  Inference mode: {mode_label}")
+        if args.async_inference:
+            print(f"  Async S3 output: {args.async_s3_output or '(not set)'}")
         return
 
     # Validate S3 object exists
@@ -345,18 +383,29 @@ def main(argv: list[str] | None = None) -> None:
         hf_token=hf_token,
         image_uri=args.image_uri,
         sm_client=sm_client,
+        async_inference=args.async_inference,
+        async_s3_output=args.async_s3_output,
     )
 
     print(f"\nEndpoint '{endpoint}' is InService.")
-    print("\nTest with:")
-    print(
-        f"  aws sagemaker-runtime invoke-endpoint \\\n"
-        f"    --endpoint-name {endpoint} \\\n"
-        f"    --content-type application/json \\\n"
-        f"    --cli-binary-format raw-in-base64-out \\\n"
-        f"    --body '{{\"text\": \"What are symptoms of pneumonia?\"}}' \\\n"
-        f"    /dev/stdout"
-    )
+    if args.async_inference:
+        print("\nTest with (async):")
+        print(
+            f"  aws sagemaker-runtime invoke-endpoint-async \\\n"
+            f"    --endpoint-name {endpoint} \\\n"
+            f"    --content-type application/json \\\n"
+            f"    --input-location s3://your-bucket/input.json"
+        )
+    else:
+        print("\nTest with:")
+        print(
+            f"  aws sagemaker-runtime invoke-endpoint \\\n"
+            f"    --endpoint-name {endpoint} \\\n"
+            f"    --content-type application/json \\\n"
+            f"    --cli-binary-format raw-in-base64-out \\\n"
+            f"    --body '{{\"text\": \"What are symptoms of pneumonia?\"}}' \\\n"
+            f"    /dev/stdout"
+        )
 
 
 if __name__ == "__main__":

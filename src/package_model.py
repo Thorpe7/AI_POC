@@ -28,6 +28,12 @@ from pathlib import Path
 CODE_REQUIREMENTS = """\
 # HF DLC includes torch, transformers, accelerate, Pillow.
 # Only add deps missing from the container image.
+merlin-vlm>=0.0.6
+monai>=1.3.0
+nibabel>=5.0.0
+einops>=0.7.0
+peft>=0.10.0
+sentencepiece>=0.2.0
 """
 
 

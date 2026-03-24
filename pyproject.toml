@@ -24,6 +24,14 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
 ]
+merlin = [
+    "merlin-vlm>=0.1.0",
+    "monai>=1.3.0",
+    "nibabel>=5.0.0",
+    "einops>=0.7.0",
+    "peft>=0.10.0",
+    "sentencepiece>=0.2.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

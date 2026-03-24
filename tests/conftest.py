@@ -19,6 +19,12 @@ _SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+# Stub out optional Merlin deps so tests don't require them installed.
+# Do NOT stub sentencepiece — transformers inspects its __spec__ at import time.
+for _mod in ("merlin", "nibabel", "monai", "monai.transforms", "einops", "peft"):
+    if _mod not in sys.modules:
+        sys.modules[_mod] = MagicMock()
+
 
 # ── Old inference.py fixtures (kept for backward compat) ──
 
@@ -83,6 +89,8 @@ def sample_medgemma_config() -> dict[str, Any]:
         "output_key": "generated_text",
         "estimated_gpu_memory_gb": 9.0,
         "requires_hf_token": True,
+        "supports_chat": True,
+        "max_chat_turns": 20,
     }
 
 
@@ -105,7 +113,7 @@ def mock_registry(configs_dir: Path) -> object:
     ):
         mock_torch.cuda.is_available.return_value = True
         mock_torch.cuda.get_device_properties.return_value = MagicMock(
-            total_mem=24 * (1024**3)  # 24 GB
+            total_memory=24 * (1024**3)  # 24 GB
         )
         mock_torch.cuda.OutOfMemoryError = RuntimeError
         mock_torch.cuda.empty_cache = MagicMock()
@@ -119,3 +127,89 @@ def mock_registry(configs_dir: Path) -> object:
             registry = ModelRegistry(configs_dir)
 
         return registry
+
+
+# ── Chat session fixtures ──
+
+
+@pytest.fixture
+def mock_session_manager() -> Any:
+    """Fresh ChatSessionManager for testing."""
+    from handlers.chat_sessions import ChatSessionManager
+
+    return ChatSessionManager()
+
+
+@pytest.fixture
+def mock_job_manager() -> Any:
+    """Fresh JobManager for testing."""
+    from handlers.job_manager import JobManager
+
+    return JobManager()
+
+
+@pytest.fixture
+def mock_context(
+    mock_registry: object, mock_session_manager: Any, mock_job_manager: Any,
+) -> dict[str, Any]:
+    """Context dict matching what model_fn returns."""
+    return {
+        "registry": mock_registry,
+        "session_manager": mock_session_manager,
+        "job_manager": mock_job_manager,
+    }
+
+
+@pytest.fixture
+def sample_chat_request_body(sample_image_base64: str) -> str:
+    """JSON request body for a chat request with image."""
+    return json.dumps({
+        "model": "medgemma",
+        "text": "What's in this scan?",
+        "image": sample_image_base64,
+    })
+
+
+@pytest.fixture
+def sample_chat_clear_request_body() -> str:
+    """JSON request body for clearing a session."""
+    return json.dumps({
+        "model": "medgemma",
+        "session_id": "test-session-id",
+        "clear_session": True,
+    })
+
+
+# ── Merlin fixtures ──
+
+
+@pytest.fixture
+def sample_merlin_config() -> dict[str, Any]:
+    """Config dict matching the merlin.json schema."""
+    return {
+        "display_name": "Merlin 3D CT VLM",
+        "handler_class": "MerlinHandler",
+        "weights_s3_uri": "s3://test-bucket/weights/merlin/",
+        "estimated_gpu_memory_gb": 12.0,
+        "input_modality": "volume",
+        "supports_chat": False,
+        "valid_modes": ["findings", "phenotype", "retrieval", "prediction", "report"],
+        "preprocessing": {
+            "target_shape": [224, 224, 160],
+            "hu_clip_range": [-1024, 3071],
+        },
+    }
+
+
+@pytest.fixture
+def multi_model_configs_dir(
+    tmp_path: Path,
+    sample_medgemma_config: dict[str, Any],
+    sample_merlin_config: dict[str, Any],
+) -> Path:
+    """Temporary directory with both medgemma.json and merlin.json config files."""
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "medgemma.json").write_text(json.dumps(sample_medgemma_config))
+    (configs / "merlin.json").write_text(json.dumps(sample_merlin_config))
+    return configs

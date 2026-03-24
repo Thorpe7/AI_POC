@@ -1,0 +1,13 @@
+{
+  "display_name": "Merlin 3D CT VLM",
+  "handler_class": "MerlinHandler",
+  "weights_s3_uri": "s3://ai-poc-sagemaker-endpoint-706262411476/weights/merlin/",
+  "estimated_gpu_memory_gb": 12.0,
+  "input_modality": "volume",
+  "supports_chat": false,
+  "valid_modes": ["findings", "phenotype", "retrieval", "prediction", "report"],
+  "preprocessing": {
+    "target_shape": [224, 224, 160],
+    "hu_clip_range": [-1024, 3071]
+  }
+}

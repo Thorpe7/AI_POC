@@ -123,6 +123,23 @@ class TestHFHandlerPredictFn:
         assert generate_kwargs["max_new_tokens"] == 512
         assert generate_kwargs["do_sample"] is False
 
+    def test_pre_built_messages_path(
+        self, sample_medgemma_config: dict[str, Any], mock_model_dict: dict[str, Any]
+    ) -> None:
+        """predict_fn uses input_data['messages'] directly when present."""
+        handler = HFHandler(sample_medgemma_config)
+        messages = [
+            {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+            {"role": "assistant", "content": "Hi!"},
+            {"role": "user", "content": [{"type": "text", "text": "Follow-up"}]},
+        ]
+
+        handler.predict_fn({"messages": messages}, mock_model_dict)
+
+        mock_model_dict["processor"].apply_chat_template.assert_called_once()
+        call_args = mock_model_dict["processor"].apply_chat_template.call_args
+        assert call_args[0][0] == messages
+
 
 class TestHFHandlerOutputFn:
     """Tests for output_fn."""
