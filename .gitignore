@@ -1,3 +1,17 @@
+
+usr.md
+plan.md
+workflow.md
+.python-version
+.fastembed_cache/
+
+# Model artifacts
+*.tar
+*.tar.gz
+*.safetensors
+model_staging/
+notebook_poc/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
