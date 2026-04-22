@@ -1,0 +1,37 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: medgemma
+  namespace: xnat
+  annotations:
+    serving.kserve.io/scaleTarget: "3"
+    serving.kserve.io/minReplicas: "0"
+    serving.kserve.io/scaleMetric: "concurrency"
+spec:
+  predictor:
+    containers:
+      - name: medgemma
+        image: maxwellthorpe/ai-poc-phase2:0.0.4
+        command:
+          - "python3"
+          - "entrypoint.py"
+        args:
+          - --model_name
+          - medgemma
+        resources:
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "8"
+            memory: "32Gi"
+            nvidia.com/gpu: "1"
+        volumeMounts:
+          - name: xnat-archive
+            mountPath: /data/xnat/archive
+            readOnly: true
+    volumes:
+      - name: xnat-archive
+        persistentVolumeClaim:
+          claimName: xnat-archive
