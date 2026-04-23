@@ -11,7 +11,7 @@ spec:
   predictor:
     containers:
       - name: medgemma
-        image: maxwellthorpe/ai-poc-phase2:0.0.4
+        image: maxwellthorpe/ai-poc-phase2:0.0.5
         command:
           - "python3"
           - "entrypoint.py"
