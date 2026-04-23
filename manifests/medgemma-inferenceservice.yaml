@@ -16,8 +16,16 @@ spec:
           - "python3"
           - "entrypoint.py"
         args:
+          - --handler_type
+          - vllm
           - --model_name
           - medgemma
+          - --model_dir
+          - /data/xnat/archive/AI-POC/resources/ModelWeights/medgemma-4b-it
+          - --dtype
+          - bfloat16
+          - --max_model_len
+          - "32768"
         resources:
           requests:
             cpu: "4"

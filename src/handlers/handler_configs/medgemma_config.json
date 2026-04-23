@@ -1,6 +1,0 @@
-{
-    "model_name": "medgemma",
-    "model_dir": "/data/xnat/archive/AI-POC/resources/ModelWeights/medgemma-4b-it",
-    "dtype": "float16",
-    "max_model_len": 32768
-}

@@ -8,7 +8,7 @@ from typing import Any
 from src.handlers.vllm_handler import VLLMHandler
 
 HANDLER_REGISTRY: dict[str, type] = {
-    "medgemma": VLLMHandler,
+    "vllm": VLLMHandler,
 }
 
 
@@ -17,12 +17,12 @@ class KserveModelHandler(kserve.Model):
 
     def __init__(self, name: str, config: dict[str, Any]):
         super().__init__(name, return_response_headers=True)
-        model_name = config["model_name"]
-        if model_name not in HANDLER_REGISTRY:
+        handler_type = config["handler_type"]
+        if handler_type not in HANDLER_REGISTRY:
             raise ValueError(
-                f"Unknown model: {model_name}. Available: {list(HANDLER_REGISTRY.keys())}"
+                f"Unknown handler_type: {handler_type}. Available: {list(HANDLER_REGISTRY.keys())}"
             )
-        handler_cls = HANDLER_REGISTRY[model_name]
+        handler_cls = HANDLER_REGISTRY[handler_type]
         self.handler = handler_cls(config=config)
         self.handler.model_fn()
         self.ready = True

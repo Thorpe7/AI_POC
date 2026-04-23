@@ -1,0 +1,14 @@
+FROM vllm/vllm-openai:v0.19.1
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir "poetry>=2.0,<3.0" \
+    && poetry config virtualenvs.create false
+
+COPY pyproject.toml poetry.lock ./
+RUN poetry install --only main,vllm --no-root --no-cache
+
+COPY entrypoint.py .
+COPY src/ src/
+
+ENTRYPOINT ["python3", "entrypoint.py"]
