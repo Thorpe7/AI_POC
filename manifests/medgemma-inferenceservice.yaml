@@ -9,6 +9,17 @@ metadata:
     serving.kserve.io/scaleMetric: "concurrency"
 spec:
   predictor:
+    nodeSelector:
+      karpenter.sh/nodepool: gpu-ai
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: workload.type
+        operator: Equal
+        value: "ai"
+        effect: NoSchedule
     containers:
       - name: medgemma
         image: maxwellthorpe/ai-poc-phase2:0.0.5

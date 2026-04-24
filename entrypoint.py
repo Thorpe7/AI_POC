@@ -1,5 +1,16 @@
 """Entrypoint for the KServe inference container."""
 
+import os
+
+# OpenCV prepends `.../cv2/../../lib64` to LD_LIBRARY_PATH on import, which can
+# shadow the system CUDA libs at dlopen time (vllm#35608). Strip it before any
+# import path that cascades into torch/vllm.
+_ORIG_LD_LIBRARY_PATH = os.environ.get("LD_LIBRARY_PATH", "")
+if "/cv2/" in _ORIG_LD_LIBRARY_PATH:
+    os.environ["LD_LIBRARY_PATH"] = ":".join(
+        p for p in _ORIG_LD_LIBRARY_PATH.split(":") if "/cv2/" not in p
+    )
+
 import argparse
 import logging
 import sys
@@ -24,6 +35,13 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", default="bfloat16", help="vLLM load dtype")
     parser.add_argument("--max_model_len", type=int, default=32768, help="vLLM max context length")
     args = parser.parse_args()
+
+    if _ORIG_LD_LIBRARY_PATH != os.environ.get("LD_LIBRARY_PATH", ""):
+        log.info(
+            "sanitized LD_LIBRARY_PATH (stripped cv2 prefix): before=%s after=%s",
+            _ORIG_LD_LIBRARY_PATH,
+            os.environ.get("LD_LIBRARY_PATH", ""),
+        )
 
     config = {
         "handler_type": args.handler_type,

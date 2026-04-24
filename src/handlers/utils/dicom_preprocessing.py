@@ -6,7 +6,7 @@ import numpy as np
 import pydicom
 from PIL import Image
 
-MAX_SLICES = 85
+MAX_SLICES = 32  #! must equal VLLMHandler.limit_mm_per_prompt["image"]
 
 
 def load_dicom_series(dicom_dir: Path) -> list[pydicom.Dataset]:

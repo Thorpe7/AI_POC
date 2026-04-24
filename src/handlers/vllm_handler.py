@@ -1,10 +1,13 @@
 """EmbarkLab's handler class for vLLM-supported models."""
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+import torch
+import vllm as _vllm
 from PIL import Image
 from vllm import LLM, SamplingParams
 
@@ -29,8 +32,36 @@ class VLLMHandler:
         self.max_model_len = config.get("max_model_len", 32768)
         self.model: LLM | None = None
 
+    @staticmethod
+    def _log_env_versions() -> None:
+        """Log torch/cuda/vllm versions to help diagnose CUBLAS shape/version bugs."""
+        log.info("vllm version: %s", getattr(_vllm, "__version__", "unknown"))
+        log.info("torch version: %s", torch.__version__)
+        log.info("torch compiled cuda version: %s", torch.version.cuda)
+        log.info("torch compiled cudnn version: %s", torch.backends.cudnn.version())
+        log.info("cuda available: %s", torch.cuda.is_available())
+        if torch.cuda.is_available():
+            log.info("cuda device count: %d", torch.cuda.device_count())
+            for i in range(torch.cuda.device_count()):
+                log.info(
+                    "cuda device %d: name=%s capability=%s",
+                    i,
+                    torch.cuda.get_device_name(i),
+                    torch.cuda.get_device_capability(i),
+                )
+            try:
+                driver = torch._C._cuda_getDriverVersion()
+                runtime = torch._C._cuda_getRuntimeVersion()
+                log.info("cuda driver version: %s", driver)
+                log.info("cuda runtime version: %s", runtime)
+            except Exception as e:
+                log.warning("could not read cuda driver/runtime versions: %s", e)
+        log.info("LD_LIBRARY_PATH: %s", os.environ.get("LD_LIBRARY_PATH", "<unset>"))
+        log.info("CUDA_VISIBLE_DEVICES: %s", os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"))
+
     def model_fn(self) -> None:
         """Load model via vLLM from mounted directory."""
+        self._log_env_versions()
         log.info(
             "loading vLLM model: dir=%s dtype=%s max_model_len=%d",
             self.model_dir,
@@ -41,6 +72,9 @@ class VLLMHandler:
             model=str(self.model_dir),
             dtype=self.dtype,
             max_model_len=self.max_model_len,
+            limit_mm_per_prompt={"image": 32},  #! MUST match MAX_SLICES; profile_run sizes dummy mm batch to this
+            max_num_seqs=2,  #! A10G 24GB can't fit the default 256 concurrent multimodal seqs
+            enforce_eager=True,  #! skip CUDA-graph capture; doubles profile memory for negligible gain at batch=1-2
         )
         log.info("vLLM model loaded")
 
