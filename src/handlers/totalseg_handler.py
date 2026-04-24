@@ -65,13 +65,16 @@ class TotalSegmentatorHandler:
         }
 
     def predict_fn(self, parsed: dict[str, Any]) -> dict[str, Any]:
+        # For output_type="dicom_seg", TS expects `output` to be a file path
+        # (not a directory); its wrapper uses output.parent as the stats dir.
         output_dir = self.output_root / "totalseg" / _stamp()
         output_dir.mkdir(parents=True, exist_ok=False)
+        seg_path = output_dir / "segmentations.dcm"
 
         log.info(
             "running totalsegmentator: input=%s output=%s task=%s fast=%s roi_subset=%s",
             parsed["dicom_dir"],
-            output_dir,
+            seg_path,
             parsed["task"],
             parsed["fast"],
             parsed["roi_subset"],
@@ -80,10 +83,10 @@ class TotalSegmentatorHandler:
         t0 = time.time()
         totalsegmentator(
             input=parsed["dicom_dir"],
-            output=str(output_dir),
+            output=str(seg_path),
             task=parsed["task"],
             fast=parsed["fast"],
-            output_type="dicom",
+            output_type="dicom_seg",
             roi_subset=parsed["roi_subset"],
         )
         elapsed = time.time() - t0
@@ -91,6 +94,7 @@ class TotalSegmentatorHandler:
 
         return {
             "output_dir": str(output_dir),
+            "seg_path": str(seg_path),
             "elapsed_s": elapsed,
             "task": parsed["task"],
             "fast": parsed["fast"],
@@ -100,16 +104,15 @@ class TotalSegmentatorHandler:
     def output_fn(
         self, prediction: dict[str, Any], slice_info: dict | None = None
     ) -> dict[str, Any]:
-        output_dir = Path(prediction["output_dir"])
-        seg_path = output_dir / "segmentations.dcm"
+        seg_path = Path(prediction["seg_path"])
         if not seg_path.is_file():
-            contents = sorted(p.name for p in output_dir.iterdir())
+            contents = sorted(p.name for p in seg_path.parent.iterdir())
             raise RuntimeError(
                 f"expected SEG file not found: {seg_path} (contents: {contents})"
             )
         return {
             "seg_path": str(seg_path),
-            "output_dir": str(output_dir),
+            "output_dir": prediction["output_dir"],
             "task": prediction["task"],
             "fast": prediction["fast"],
             "roi_subset": prediction["roi_subset"],

@@ -22,7 +22,7 @@ spec:
         effect: NoSchedule
     containers:
       - name: totalseg
-        image: maxwellthorpe/ai-poc-phase2-totalseg:0.0.1
+        image: maxwellthorpe/ai-poc-phase2-totalseg:0.0.2
         command:
           - "python3"
           - "entrypoint.py"
