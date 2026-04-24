@@ -1,8 +1,10 @@
 """EmbarkLab's handler class for vLLM-supported models."""
 
+import base64
 import logging
 import os
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,10 @@ import vllm as _vllm
 from PIL import Image
 from vllm import LLM, SamplingParams
 
-from src.handlers.utils.dicom_preprocessing import preprocess_dicom_series
+from src.handlers.utils.dicom_preprocessing import (
+    preprocess_dicom_series,
+    preprocess_single_dicom,
+)
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +27,13 @@ MAX_TEXT_CHARS_PER_FILE = 50_000
 THINKING_BLOCK_RE = re.compile(r"<unused94>.*?(<unused95>|$)", re.DOTALL)
 
 
+def _pil_to_data_uri(img: Image.Image) -> str:
+    """Encode a PIL image as a base64 PNG data URI for vLLM's chat image_url."""
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 class VLLMHandler:
     """Custom model handler using vLLM for inference."""
 
@@ -30,6 +42,8 @@ class VLLMHandler:
         self.model_dir = Path(config["model_dir"])
         self.dtype = config.get("dtype", "bfloat16")
         self.max_model_len = config.get("max_model_len", 32768)
+        self.image_size = int(config.get("image_size", 896))
+        self.max_images = int(config.get("max_images", 32))
         self.model: LLM | None = None
 
     @staticmethod
@@ -63,16 +77,18 @@ class VLLMHandler:
         """Load model via vLLM from mounted directory."""
         self._log_env_versions()
         log.info(
-            "loading vLLM model: dir=%s dtype=%s max_model_len=%d",
+            "loading vLLM model: dir=%s dtype=%s max_model_len=%d image_size=%d max_images=%d",
             self.model_dir,
             self.dtype,
             self.max_model_len,
+            self.image_size,
+            self.max_images,
         )
         self.model = LLM(
             model=str(self.model_dir),
             dtype=self.dtype,
             max_model_len=self.max_model_len,
-            limit_mm_per_prompt={"image": 32},  #! MUST match MAX_SLICES; profile_run sizes dummy mm batch to this
+            limit_mm_per_prompt={"image": self.max_images},  #! profile_run sizes dummy mm batch to this
             max_num_seqs=2,  #! A10G 24GB can't fit the default 256 concurrent multimodal seqs
             enforce_eager=True,  #! skip CUDA-graph capture; doubles profile memory for negligible gain at batch=1-2
         )
@@ -97,13 +113,21 @@ class VLLMHandler:
         used_indices: list[int] = []
 
         if "dicom_dir" in request:
+            if self.max_images <= 1:
+                raise ValueError(
+                    f"dicom_dir not supported: {self.model_name} accepts at most "
+                    f"{self.max_images} image(s); send a single file via image_paths"
+                )
             slice_range = request.get("slice_range")
             if slice_range is not None:
                 if not (isinstance(slice_range, (list, tuple)) and len(slice_range) == 2):
                     raise ValueError("slice_range must be [start, end]")
                 slice_range = (int(slice_range[0]), int(slice_range[1]))
             images, total, used_indices = preprocess_dicom_series(
-                Path(request["dicom_dir"]), slice_range=slice_range
+                Path(request["dicom_dir"]),
+                slice_range=slice_range,
+                max_slices=self.max_images,
+                image_size=self.image_size,
             )
             slice_info = {
                 "total_slices": total,
@@ -113,9 +137,19 @@ class VLLMHandler:
         else:
             if "slice_range" in request:
                 raise ValueError("slice_range requires dicom_dir")
+            image_paths = request.get("image_paths", [])
+            if len(image_paths) > self.max_images:
+                raise ValueError(
+                    f"{self.model_name} accepts at most {self.max_images} image(s); "
+                    f"received {len(image_paths)}"
+                )
             images = []
-            for path in request.get("image_paths", []):
-                images.append(Image.open(path).convert("RGB"))
+            for path_str in image_paths:
+                path = Path(path_str)
+                if path.suffix.lower() == ".dcm":
+                    images.append(preprocess_single_dicom(path, image_size=self.image_size))
+                else:
+                    images.append(Image.open(path).convert("RGB"))
 
         text_docs: list[str] = []
         for path_str in request.get("text_paths", []):
@@ -132,11 +166,11 @@ class VLLMHandler:
             text_docs.append(body)
 
         # Build chat messages: images -> text docs -> prompt
-        slice_labels = used_indices if used_indices else list(range(len(images)))
         content: list[dict[str, Any]] = []
         for i, img in enumerate(images):
-            content.append({"type": "image_url", "image_url": {"url": img}})
-            content.append({"type": "text", "text": f"SLICE {slice_labels[i]}"})
+            content.append({"type": "image_url", "image_url": {"url": _pil_to_data_uri(img)}})
+            if used_indices:
+                content.append({"type": "text", "text": f"SLICE {used_indices[i]}"})
         for i, body in enumerate(text_docs):
             content.append({"type": "text", "text": f"DOCUMENT {i}:\n{body}"})
         content.append({"type": "text", "text": prompt})

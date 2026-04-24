@@ -1,7 +1,7 @@
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
-  name: medgemma
+  name: llava-med
   namespace: xnat
   annotations:
     serving.kserve.io/scaleTarget: "3"
@@ -21,7 +21,7 @@ spec:
         value: "ai"
         effect: NoSchedule
     containers:
-      - name: medgemma
+      - name: llava-med
         image: maxwellthorpe/ai-poc-phase2:0.0.6
         command:
           - "python3"
@@ -30,17 +30,17 @@ spec:
           - --handler_type
           - vllm
           - --model_name
-          - medgemma
+          - llava-med
           - --model_dir
-          - /data/xnat/archive/AI-POC/resources/ModelWeights/medgemma-4b-it
+          - /data/xnat/archive/AI-POC/resources/ModelWeights/llava-med-v1.5-mistral-7b
           - --dtype
           - bfloat16
           - --max_model_len
-          - "32768"
+          - "4096"
           - --image_size
-          - "896"
+          - "336"
           - --max_images
-          - "32"
+          - "1"
         resources:
           requests:
             cpu: "4"

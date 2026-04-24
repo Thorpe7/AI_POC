@@ -1,7 +1,7 @@
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
-  name: medgemma
+  name: totalseg
   namespace: xnat
   annotations:
     serving.kserve.io/scaleTarget: "3"
@@ -21,26 +21,22 @@ spec:
         value: "ai"
         effect: NoSchedule
     containers:
-      - name: medgemma
-        image: maxwellthorpe/ai-poc-phase2:0.0.6
+      - name: totalseg
+        image: maxwellthorpe/ai-poc-phase2-totalseg:0.0.1
         command:
           - "python3"
           - "entrypoint.py"
         args:
           - --handler_type
-          - vllm
+          - totalseg
           - --model_name
-          - medgemma
-          - --model_dir
-          - /data/xnat/archive/AI-POC/resources/ModelWeights/medgemma-4b-it
-          - --dtype
-          - bfloat16
-          - --max_model_len
-          - "32768"
-          - --image_size
-          - "896"
-          - --max_images
-          - "32"
+          - totalseg
+          - --output_root
+          - /data/xnat/archive/AI-POC/resources/output
+          - --task_default
+          - total
+          - --fast_default
+          - "true"
         resources:
           requests:
             cpu: "4"
@@ -54,6 +50,9 @@ spec:
           - name: xnat-archive
             mountPath: /data/xnat/archive
             readOnly: true
+          - name: xnat-archive
+            mountPath: /data/xnat/archive/AI-POC/resources/output
+            subPath: AI-POC/resources/output
     volumes:
       - name: xnat-archive
         persistentVolumeClaim:

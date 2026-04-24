@@ -1,4 +1,4 @@
-"""DICOM preprocessing utilities for MedGemma 3D volume input."""
+"""DICOM preprocessing utilities for vLLM-served medical imaging models."""
 
 from pathlib import Path
 
@@ -6,7 +6,8 @@ import numpy as np
 import pydicom
 from PIL import Image
 
-MAX_SLICES = 32  #! must equal VLLMHandler.limit_mm_per_prompt["image"]
+DEFAULT_MAX_SLICES = 32  #! must be <= VLLMHandler.limit_mm_per_prompt["image"]
+DEFAULT_IMAGE_SIZE = 896  # MedGemma vision encoder input
 
 
 def load_dicom_series(dicom_dir: Path) -> list[pydicom.Dataset]:
@@ -19,7 +20,7 @@ def load_dicom_series(dicom_dir: Path) -> list[pydicom.Dataset]:
     return slices
 
 
-def sample_equidistant_indices(n: int, max_slices: int = MAX_SLICES) -> list[int]:
+def sample_equidistant_indices(n: int, max_slices: int = DEFAULT_MAX_SLICES) -> list[int]:
     """Return equidistant indices into a series of length n, capped at max_slices."""
     if n <= max_slices:
         return list(range(n))
@@ -55,16 +56,41 @@ def apply_mri_normalization(
     return np.stack([normalized, normalized, normalized], axis=-1)
 
 
+def preprocess_single_dicom(
+    dicom_path: Path,
+    image_size: int = DEFAULT_IMAGE_SIZE,
+) -> Image.Image:
+    """Load a single DICOM file and return a preprocessed PIL image."""
+    dcm = pydicom.dcmread(dicom_path)
+    pixel_array = dcm.pixel_array
+    modality = getattr(dcm, "Modality", "CT").upper()
+
+    if modality == "CT":
+        intercept = float(getattr(dcm, "RescaleIntercept", 0))
+        slope = float(getattr(dcm, "RescaleSlope", 1))
+        rgb = apply_ct_windowing(pixel_array, intercept, slope)
+    else:
+        vol_min = float(pixel_array.min())
+        vol_max = float(pixel_array.max())
+        rgb = apply_mri_normalization(pixel_array, vol_min, vol_max)
+
+    return Image.fromarray(rgb).resize((image_size, image_size), Image.BILINEAR)
+
+
 def preprocess_dicom_series(
     dicom_dir: Path,
     slice_range: tuple[int, int] | None = None,
+    max_slices: int = DEFAULT_MAX_SLICES,
+    image_size: int = DEFAULT_IMAGE_SIZE,
 ) -> tuple[list[Image.Image], int, list[int]]:
-    """Load a DICOM series and return preprocessed 896x896 PIL images.
+    """Load a DICOM series and return preprocessed PIL images.
 
     Args:
         dicom_dir: Directory containing .dcm files.
         slice_range: Optional (start, end) 0-indexed inclusive range into the
             sorted series. If omitted, falls back to equidistant sampling.
+        max_slices: Upper bound on the number of slices returned.
+        image_size: Target edge length for the square output images.
 
     Returns:
         Tuple of (images, total_slices, used_indices). used_indices are the
@@ -89,13 +115,13 @@ def preprocess_dicom_series(
                 f"slice_range [{start}, {end}] out of bounds for series with {total_slices} slices"
             )
         count = end - start + 1
-        if count > MAX_SLICES:
+        if count > max_slices:
             raise ValueError(
-                f"slice_range [{start}, {end}] selects {count} slices; max is {MAX_SLICES}"
+                f"slice_range [{start}, {end}] selects {count} slices; max is {max_slices}"
             )
         used_indices = list(range(start, end + 1))
     else:
-        used_indices = sample_equidistant_indices(total_slices)
+        used_indices = sample_equidistant_indices(total_slices, max_slices=max_slices)
 
     images = []
     for idx in used_indices:
@@ -109,7 +135,7 @@ def preprocess_dicom_series(
         else:
             rgb = apply_mri_normalization(pixel_array, vol_min, vol_max)
 
-        img = Image.fromarray(rgb).resize((896, 896), Image.BILINEAR)
+        img = Image.fromarray(rgb).resize((image_size, image_size), Image.BILINEAR)
         images.append(img)
 
     return images, total_slices, used_indices

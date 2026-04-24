@@ -1,0 +1,12 @@
+FROM wasserth/totalsegmentator:2.12.0
+# Base provides python:3.11-slim + torch (CUDA 12.1) + totalsegmentator +
+# pretrained weights baked in. We only add the KServe server layer.
+
+WORKDIR /srv
+
+RUN pip install --no-cache-dir "kserve>=0.17,<0.18"
+
+COPY entrypoint.py .
+COPY src/ src/
+
+ENTRYPOINT ["python3", "entrypoint.py"]
